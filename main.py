@@ -1,9 +1,15 @@
+# -*- coding: utf-8 -*-
+
 import StringIO
 import json
 import logging
 import random
 import urllib
 import urllib2
+
+# Custom imports
+from inputModel import inputModel
+import responseController
 
 # for sending images
 from PIL import Image
@@ -13,27 +19,50 @@ import multipart
 from google.appengine.api import urlfetch
 from google.appengine.ext import ndb
 import webapp2
-import datetime
+
+######## GLOBAL VARIABLES ########
 
 TOKEN = '239006379:AAE5P9YmX_jFrLIcKubY0EpV2sKzs-dclXE'
 
 BASE_URL = 'https://api.telegram.org/bot' + TOKEN + '/'
 
+WEATHER_BASE_URL = 'http://api.openweathermap.org/data/2.5/weather?'
+WEATHER_API_KEY = '04f9cff3a5fbb8c457e31444bae05328'
+WEATHER_CITY_NAME = 'q='
+WEATHER_CITY_LAT = 'lat='
+WEATHER_CITY_LNG = 'lon='
+WEATHER_UNIT = 'metric'
+WEATHER_DAY_CNT = 1
+
+degree_sign = u'\N{DEGREE SIGN}'
+
+
+# ================================
+
+
+######## HELPER CLASSES AND FUNCTIONS ########
 
 class EnableStatus(ndb.Model):
     # key name: str(chat_id)
     enabled = ndb.BooleanProperty(indexed=False, default=False)
+
+
+# ================================
 
 def setEnabled(chat_id, yes):
     es = EnableStatus.get_or_insert(str(chat_id))
     es.enabled = yes
     es.put()
 
+
 def getEnabled(chat_id):
     es = EnableStatus.get_by_id(str(chat_id))
     if es:
         return es.enabled
     return False
+
+
+# ================================
 
 class MeHandler(webapp2.RequestHandler):
     def get(self):
@@ -52,81 +81,66 @@ class SetWebhookHandler(webapp2.RequestHandler):
         urlfetch.set_default_fetch_deadline(60)
         url = self.request.get('url')
         if url:
-            self.response.write(json.dumps(json.load(urllib2.urlopen(BASE_URL + 'setWebhook', urllib.urlencode({'url': url})))))
+            self.response.write(
+                json.dumps(json.load(urllib2.urlopen(BASE_URL + 'setWebhook', urllib.urlencode({'url': url})))))
 
 
 class WebhookHandler(webapp2.RequestHandler):
     def post(self):
         urlfetch.set_default_fetch_deadline(60)
         body = json.loads(self.request.body)
+
         logging.info('request body:')
-        logging.info(body)
+        logging.info(json.dumps(body))
+
         self.response.write(json.dumps(body))
+        newInput = inputModel(body)
 
-        update_id = body['update_id']
-        message = body['message']
-        message_id = message.get('message_id')
-        date = message.get('date')
-        text = message.get('text')
-        fr = message.get('from')
-        chat = message['chat']
-        chat_id = chat['id']
+        update_id = newInput.getUpdateID()
+        message_id = newInput.getMessageID()
+        text = newInput.getText()
+        fromID = newInput.getFromID()
+        fromUserName = newInput.getFromName()
+        chat_id = newInput.getChatID()
+        location = newInput.getLocation()
+        lat = newInput.getLat()
+        lng = newInput.getLng()
 
-        if not text:
-            logging.info('no text')
+        if text or location:  # check if text or location is entered
+            if text:  # for text inputs
+                if text.startswith('/'):  # check if command
+                    if text.lower() == '/start':
+                        responseController.sendTextMessage(chat_id,'@streatbeat : started.')
+                        setEnabled(chat_id, True)
+                    elif text.lower() == '/stop':
+                        responseController.sendTextMessage(chat_id, '@streatbeat : stopped')
+                        setEnabled(chat_id, False)
+                    elif text.lower() == '/help':
+                        responseController.sendTextMessage(chat_id,'@streatbeat : serving weather now report type place, or share your location.')
+                    elif text.lower().startswith('/w'):
+                        responseController.sendTextMessage(chat_id,'@streatbeat : send me your place or share your location to.')
+                    else:
+                        responseController.sendTextMessage(chat_id, '@streatbeat : oh ! whoa .')
+                        return
+                else:
+                    if getEnabled(chat_id):
+                        weatherResponse = responseController.textInputRequest(text)
+                        responseController.textInputHandler(chat_id, weatherResponse)
+                        return
+
+                    else:
+                        logging.info('not enabled for chat_id {}'.format(chat_id))
+                        responseController.sendTextMessage(chat_id, 'Please enable bot by writing /start')
+                return
+            else:
+                weatherResponse = responseController.locationInputRequest(lat, lng)
+                responseController.locationInputHandler(chat_id, weatherResponse)
+                return
+
+        else:  # no meaningful input, EXIT!
+            logging.info('no text or location from user')
+            responseController.sendTextMessage(chat_id, 'Enter your location by text or map')
             return
-
-        def reply(msg=None, img=None):
-            if msg:
-                resp = urllib2.urlopen(BASE_URL + 'sendMessage', urllib.urlencode({
-                    'chat_id': str(chat_id),
-                    'text': msg.encode('utf-8'),
-                    'disable_web_page_preview': 'true',
-                    'reply_to_message_id': str(message_id),
-                })).read()
-            elif img:
-                resp = multipart.post_multipart(BASE_URL + 'sendPhoto', [
-                    ('chat_id', str(chat_id)),
-                    ('reply_to_message_id', str(message_id)),
-                ], [
-                    ('photo', 'image.jpg', img),
-                ])
-            else:
-                logging.error('no msg or img specified')
-                resp = None
-
-            logging.info('send response:')
-            logging.info(resp)
-
-        if text.startswith('/'):
-            if text == '/start':
-                reply('Bot enabled')
-                setEnabled(chat_id, True)
-            elif text == '/stop':
-                reply('Bot disabled')
-                setEnabled(chat_id, False)
-            elif text == '/image':
-                img = Image.new('RGB', (512, 512))
-                base = random.randint(0, 16777216)
-                pixels = [base+i*j for i in range(512) for j in range(512)]  # generate sample image
-                img.putdata(pixels)
-                output = StringIO.StringIO()
-                img.save(output, 'JPEG')
-                reply(img=output.getvalue())
-            else:
-                reply('@streatbeat: What command?')
-
-        # CUSTOMIZE FROM HERE
-
-        elif 'who are you' in text:
-            reply('@streatbeat: a bot ! I was developed by Krishna Nandula')
-        elif 'what time' in text:
-            reply('@streatbeat: ' + datetime.datetime.now().strftime("%B %d, %Y %H %MM"))
-        else:
-            if getEnabled(chat_id):
-                reply('@streatbeat: sorry i do not know what you mean !')
-            else:
-                logging.info('not enabled for chat_id {}'.format(chat_id))
 
 
 app = webapp2.WSGIApplication([
